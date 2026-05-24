@@ -2,7 +2,6 @@ package com.workalbum.app
 
 import android.Manifest
 import android.content.Intent
-import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -26,6 +25,7 @@ import com.workalbum.app.ui.screens.GalleryScreen
 import com.workalbum.app.ui.screens.ImageDetailScreen
 import com.workalbum.app.ui.screens.SettingsScreen
 import com.workalbum.app.ui.theme.WorkAlbumTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -34,52 +34,35 @@ class MainActivity : ComponentActivity() {
         (application as WorkAlbumApplication).imageRepository
     }
 
-    // 权限请求
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val allGranted = permissions.values.all { it }
-        if (allGranted) {
-            startScreenshotMonitor()
-        } else {
-            Toast.makeText(this, "通知权限被拒绝，将无法收到截图提醒", Toast.LENGTH_LONG).show()
-        }
+        if (permissions.values.all { it }) startScreenshotMonitor()
+        else toast("通知权限被拒绝")
     }
 
-    // 手动从系统相册选图导入
     private val pickMediaLauncher = registerForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        if (uri != null) {
-            lifecycleScope.launch {
-                try {
-                    repository.saveSharedImage(uri, "manual_import")
-                    deleteFromMediaStore(uri)
-                    Toast.makeText(this@MainActivity, "✅ 已导入工作相册", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "导入失败: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
+        if (uri != null) lifecycleScope.launch {
+            try {
+                repository.saveSharedImage(uri, "manual_import")
+                deleteFromMediaStore(uri)
+                toast("✅ 已导入工作相册")
+            } catch (e: Exception) {
+                toast("导入失败: ${e.message}")
             }
         }
     }
 
-    /**
-     * Android 11+ 删除系统相册图片：使用系统确认对话框
-     * MediaStore.createDeleteRequest → 弹出"允许xxx删除这张图片吗？"
-     */
     private val deleteRequestLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        // 用户操作完成（无论是确认还是拒绝）
-        android.util.Log.d("WorkAlbum", "删除请求结果: ${result.resultCode}")
+        toast(if (result.resultCode == RESULT_OK) "✅ 系统相册已删除" else "用户取消了删除")
     }
-
-    // 待删除的 URI（跨 launcher 保存）
-    private var pendingDeleteUri: Uri? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent {
             WorkAlbumTheme {
                 val navController = rememberNavController()
@@ -109,9 +92,9 @@ class MainActivity : ComponentActivity() {
                             }
                             result
                         }
-                        if (image != null) {
-                            ImageDetailScreen(image = image, repository = repository, onBack = { navController.popBackStack() })
-                        }
+                        if (image != null)
+                            ImageDetailScreen(image = image, repository = repository,
+                                onBack = { navController.popBackStack() })
                     }
                     composable("settings") {
                         SettingsScreen(onBack = { navController.popBackStack() })
@@ -119,7 +102,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-
         requestPermissionsAndStartMonitor()
         handleScreenshotIntent(intent)
     }
@@ -129,21 +111,16 @@ class MainActivity : ComponentActivity() {
         handleScreenshotIntent(intent)
     }
 
-    /**
-     * 处理截图通知点击 → 导入 + 删除系统原图
-     */
     private fun handleScreenshotIntent(intent: Intent?) {
         if (intent?.action == ScreenshotMonitorService.ACTION_MOVE_SCREENSHOT) {
             val uriString = intent.getStringExtra(ScreenshotMonitorService.EXTRA_IMAGE_URI)
             if (uriString != null) {
-                val uri = Uri.parse(uriString)
-                lifecycleScope.launch {
+                lifecycleScope.launch(Dispatchers.IO) {
                     try {
-                        repository.saveSharedImage(uri, "screenshot")
-                        deleteFromMediaStore(uri)
-                        Toast.makeText(this@MainActivity, "✅ 截图已移入工作相册", Toast.LENGTH_SHORT).show()
+                        repository.saveSharedImage(Uri.parse(uriString), "screenshot")
+                        deleteFromMediaStore(Uri.parse(uriString))
                     } catch (e: Exception) {
-                        Toast.makeText(this@MainActivity, "移入失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                        runOnUiThread { toast("移入失败: ${e.message}") }
                     }
                 }
             }
@@ -151,61 +128,59 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 删除系统相册中的图片
-     *
-     * 策略（按优先级）：
-     * 1. contentResolver.delete() — 部分设备支持直接删除
-     * 2. MediaStore.createDeleteRequest() — Android 11+ 弹出系统确认窗
+     * 删除系统相册图片
+     * 策略1 catch SecurityException 后不中止，继续策略2
      */
     private fun deleteFromMediaStore(uri: Uri) {
+        // ---- 策略1：直接删除（大多数 Android 11+ 会抛 SecurityException） ----
+        var directDeleted = false
         try {
-            // 策略1：直接删除（部分设备/ColorOS 可行）
             val deleted = contentResolver.delete(uri, null, null)
             if (deleted > 0) {
-                android.util.Log.d("WorkAlbum", "系统相册已直接删除: $uri")
-                return  // 成功，无需进一步操作
+                directDeleted = true
+                runOnUiThread { toast("🗑️ 系统相册已清理") }
+                return
             }
+        } catch (e: SecurityException) {
+            // 预期行为：Android 11+ 不允许直接删除其他 APP 的文件
+            // 不 return，继续走策略2
+        }
 
-            // 策略2：Android 11+ 用 MediaStore API 弹出确认窗
+        if (directDeleted) return
+
+        // ---- 策略2：MediaStore.createDeleteRequest（弹出系统确认框） ----
+        try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val pi = MediaStore.createDeleteRequest(contentResolver, listOf(uri))
                 if (pi != null) {
-                    android.util.Log.d("WorkAlbum", "弹出系统删除确认对话框: $uri")
-                    pendingDeleteUri = uri
-                    deleteRequestLauncher.launch(
-                        IntentSenderRequest.Builder(pi.intentSender).build()
-                    )
+                    runOnUiThread {
+                        deleteRequestLauncher.launch(
+                            IntentSenderRequest.Builder(pi.intentSender).build()
+                        )
+                    }
                     return
                 }
+                runOnUiThread { toast("❌ createDeleteRequest 返回 null") }
+            } else {
+                runOnUiThread { toast("⚠️ SDK<30，需要手动删除") }
             }
-
-            // 都不行
-            android.util.Log.w("WorkAlbum", "无法删除系统原图（可能需要手动清理）")
-        } catch (e: SecurityException) {
-            android.util.Log.w("WorkAlbum", "无权限删除: ${e.message}")
         } catch (e: Exception) {
-            android.util.Log.w("WorkAlbum", "删除异常: ${e.message}")
+            runOnUiThread { toast("💥 ${e.message}") }
         }
+    }
+
+    private fun toast(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     private fun requestPermissionsAndStartMonitor() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val notificationGranted = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            val mediaGranted = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_MEDIA_IMAGES
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!notificationGranted || !mediaGranted) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissionLauncher.launch(
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.READ_MEDIA_IMAGES)
-                )
-            } else {
-                startScreenshotMonitor()
-            }
-        } else {
-            startScreenshotMonitor()
-        }
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.READ_MEDIA_IMAGES))
+            } else startScreenshotMonitor()
+        } else startScreenshotMonitor()
     }
 
     private fun startScreenshotMonitor() {
