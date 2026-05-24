@@ -1,63 +1,79 @@
-# 工作相册 (Work Album)
+# 工作相册 (Work Gallery)
 
-## 项目概述
-Android 工作图片管理 APP，将工作图片与系统相册隔离存储。
+## 项目定位
+Android 工作图片隔离管理 APP。将工作图片（截图/微信/钉钉）存入 APP 私有目录，不进系统相册，保持系统相册干净。
 
 ## 技术栈
-- 语言：Kotlin 2.0+
-- UI：Jetpack Compose + Material 3
-- 架构：MVVM (ViewModel + StateFlow)
-- 数据库：Room (存储图片元数据和备注)
-- 异步：Kotlin Coroutines + Flow
-- 构建：Gradle 8.9 + AGP 8.7+
-- 最低SDK：26 (Android 8.0)
-- 目标SDK：36
+- Kotlin 2.0 + Jetpack Compose + Material 3
+- Room 数据库（图片元数据 + 备注）
+- Coil 图片加载
+- Gradle 8.9（本地 `.gradle-local/gradle-8.9`，不用 wrapper）
+- 最低 SDK 26 / 目标 SDK 36
+- 包名：`com.workalbum.app`
+- 图片目录：`/sdcard/Android/data/com.workalbum.app/files/images/`
 
-## 项目结构
+## 架构（MVVM + Repository）
 ```
-app/src/main/java/com/workalbum/app/
-├── MainActivity.kt          # 主入口
-├── WorkAlbumApplication.kt  # Application 类
-├── ui/
-│   ├── screens/
-│   │   ├── GalleryScreen.kt      # 图片列表主页
-│   │   └── ImageDetailScreen.kt  # 图片详情（查看+备注）
-│   └── theme/
-│       └── Theme.kt              # Material3 主题
-├── receiver/
-│   └── ShareReceiver.kt          # 接收外部分享的图片
-├── service/
-│   └── ScreenshotMonitorService.kt  # 截图监控服务
-├── data/
-│   ├── ImageRepository.kt        # 数据仓库
-│   ├── ImageDatabase.kt          # Room 数据库
-│   └── ImageDao.kt               # DAO 接口
-└── model/
-    └── WorkImage.kt              # 数据模型
+MainActivity          ← 核心调度：截图导入 + 系统删除 + 手动导入
+ScreenshotMonitorService ← 后台截图监控（FileObserver秒级 + ContentObserver兜底）
+ShareReceiverActivity ← 外部分享入口（SEND + VIEW）
+ImageRepository       ← 数据仓库（文件IO + Room）
+  ├── ImageDao       ← Room DAO
+  └── ImageDatabase  ← Room DB
+
+UI (Compose):
+  GalleryScreen      ← 图片列表 + ⊕ FAB 手动导入
+  ImageDetailScreen  ← 图片详情 + 备注编辑
+  SettingsScreen     ← 设置 + 测试通知
 ```
 
-## 编码偏好
-- 使用中文注释说明关键逻辑
-- 包名：com.workalbum.app
-- 图片存储在 APP 私有目录：/sdcard/Android/data/com.workalbum.app/files/images/
-- 权限：仅请求必要权限，遵循最小权限原则
-- 所有文件操作使用 Android Scoped Storage API
+## MVP 已实现功能
+- ✅ 截图自动检测 → 通知 → 点击通知体导入
+- ✅ 导入后删除系统相册原图（MediaStore.createDeleteRequest）
+- ✅ ⊕ FAB 手动从系统相册选图导入
+- ✅ 微信「用其他应用打开」→ 工作相册
+- ✅ 图片列表 + 来源标签 + 备注
+- ✅ 批量删除
 
-## 踩坑记录（ColorOS 适配）
-- ColorOS 禁用后台通知 action 按钮，BroadcastReceiver + Notification Action 方案不可行
-- 微信的"保存图片"按钮走微信自有通道，无法拦截；需用"分享"入口
-- gradlew.bat 绕过 wrapper jar：指向本地 Gradle 分发版
-- gradle.properties 必须用 ASCII 编码，UTF-8 BOM 会导致 Android Gradle Plugin 无法识别
-- 项目路径含中文需加 `android.overridePathCheck=true`
-- 通知栏 action 按钮（addAction）在 ColorOS 无效，替代方案：点击通知体触发 PendingIntent.getActivity()
-- `adb install -r` 后需 `am force-stop` + `am start` 才能加载新代码
+## 修改指南（后续迭代往哪改）
+| 想做什么 | 改哪个文件 |
+|----------|-----------|
+| 改 UI 颜色/主题 | `ui/theme/Theme.kt` |
+| 改列表样式/布局 | `ui/screens/GalleryScreen.kt` |
+| 改详情页 | `ui/screens/ImageDetailScreen.kt` |
+| 加新页面 | `ui/screens/` 下新建，在 `MainActivity.kt` 的 NavHost 注册 |
+| 加截图检测逻辑 | `service/ScreenshotMonitorService.kt` |
+| 加新数据字段（标签/分类等）| `model/WorkImage.kt` + `data/ImageDao.kt` |
+| 加图片编辑功能 | 新建 `ui/screens/EditorScreen.kt` |
+| 改 APP 名称/图标 | `res/values/strings.xml` + `res/mipmap-*/` |
+| 添加新权限 | `AndroidManifest.xml` + `MainActivity.kt` |
+| 加外部分享入口 | `receiver/ShareReceiverActivity.kt` |
+| 改数据存储路径 | `data/ImageRepository.kt` 的 `imageDir` |
 
-## 技术决策
-- 截图监控：从后台 ContentObserver 改为 APP 内手动导入（ColorOS 兼容）
-- 通知方案：从 BroadcastReceiver 改为 PendingIntent → MainActivity 直接处理
-- Gradle：本地 `.gradle-local/gradle-8.9` 而非标准 wrapper
+## ColorOS 踩坑（必须遵守）
+1. 通知栏 **不能用 addAction 按钮**（ColorOS 禁用）→ 只用 `setContentIntent` + 点击通知体
+2. `contentResolver.delete()` 会**抛 SecurityException** 而非返回0 → 必须单独 try-catch 后继续执行 `MediaStore.createDeleteRequest()`
+3. 微信长按菜单**没有「分享」** → 用微信全屏图 → 右上角 `···` → 「用其他应用打开」
+4. `gradle.properties` **不能用 UTF-8 BOM** → 写文件用 `[System.Text.UTF8Encoding]::new($false)`
+5. 项目路径含中文 → `android.overridePathCheck=true`
+6. 通知 `PendingIntent` 用 `FLAG_IMMUTABLE`
+7. `adb install -r` 后必须 `am force-stop` + `am start` 新代码才生效
 
-## 下一步
-- 砍掉 ScreenshotMonitorService，改为 APP 内"从系统相册导入"按钮
-- 在非 OPPO 手机上验证分享入口
-- 详见 TODO.md
+## 编译 & 安装
+```powershell
+$env:ANDROID_HOME="D:\Android\Sdk"; $env:JAVA_HOME="D:\Android Developers Tool\jbr"
+cd D:\AI_Coding\工作相册
+# ⚠️ 编译前关闭 Clash Verge（否则 AGP 插件下载失败）
+.\gradlew.bat assembleDebug
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+adb shell am force-stop com.workalbum.app.debug
+adb shell am start -n com.workalbum.app.debug/com.workalbum.app.MainActivity
+# 推送 GitHub 需要开 Clash + 37890 端口代理
+```
+
+## 环境
+- JDK 21: `D:\Android Developers Tool\jbr`
+- SDK: `D:\Android\Sdk` (API 36)
+- 测试设备: OPPO ColorOS 16 (adb: 21484eb4)
+- GitHub: https://github.com/zero-boop-boop/Work-Gallery
+- gh CLI: `C:\Program Files\GitHub CLI\gh.exe`
