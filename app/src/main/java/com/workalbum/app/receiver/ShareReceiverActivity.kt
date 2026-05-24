@@ -1,7 +1,9 @@
 package com.workalbum.app.receiver
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -12,42 +14,44 @@ import com.workalbum.app.WorkAlbumApplication
 import com.workalbum.app.ui.theme.WorkAlbumTheme
 import kotlinx.coroutines.launch
 
+/**
+ * 接收外部分享/打开的图片
+ *
+ * 支持的入口：
+ * - ACTION_SEND / ACTION_SEND_MULTIPLE → 微信/相册的「分享」功能
+ * - ACTION_VIEW → 微信的「用其他应用打开」功能（intent.data 携带图片URI）
+ */
 class ShareReceiverActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 获取分享的图片
-        val imageUris = when {
+        // --- 解析图片 URI ---
+        val imageUris: List<Uri>? = when {
+            // 多图分享
             intent.action == Intent.ACTION_SEND_MULTIPLE ->
-                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+
+            // 单图分享
             intent.action == Intent.ACTION_SEND ->
-                intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)?.let { listOf(it) }
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)?.let { listOf(it) }
+
+            // ★ 微信「用其他应用打开」走 ACTION_VIEW，URI 在 intent.data
+            intent.action == Intent.ACTION_VIEW && intent.type != null && intent.type!!.startsWith("image/") ->
+                intent.data?.let { listOf(it) }
+
             else -> null
         }
 
         if (imageUris.isNullOrEmpty()) {
-            Toast.makeText(this, "\u672a\u63a5\u6536\u5230\u56fe\u7247", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "未接收到图片", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
 
-        val callingPackage = intent.`package` ?: ""
-        val sourceApp = when {
-            callingPackage.contains("tencent.mm") -> "wechat"
-            callingPackage.contains("tencent.mobileqq") -> "qq"
-            callingPackage.contains("com.alibaba.android.rimet") -> "dingtalk"
-            callingPackage.contains("chrome") || callingPackage.contains("mozilla") -> "browser"
-            else -> "other"
-        }
-
-        val sourceLabel = when (sourceApp) {
-            "wechat" -> "\u5fae\u4fe1"
-            "qq" -> "QQ"
-            "dingtalk" -> "\u9489\u9489"
-            "browser" -> "\u6d4f\u89c8\u5668"
-            else -> sourceApp
-        }
+        // --- 识别来源 APP ---
+        val sourceApp = detectSourceApp(intent)
+        val sourceLabel = sourceLabel(sourceApp)
 
         setContent {
             WorkAlbumTheme {
@@ -55,11 +59,11 @@ class ShareReceiverActivity : ComponentActivity() {
 
                 if (showDialog) {
                     AlertDialog(
-                        onDismissRequest = { /* 不做任何事 —— 禁止点外部关闭 */ },
-                        title = { Text("\u4fdd\u5b58\u5230\u5de5\u4f5c\u76f8\u518c") },
+                        onDismissRequest = { /* 禁止点外部关闭 */ },
+                        title = { Text("保存到工作相册") },
                         text = {
                             Text(
-                                "\u6765\u6e90\uff1a$sourceLabel\n\u5c06\u4fdd\u5b58 ${imageUris.size} \u5f20\u56fe\u7247\n\u4e0d\u4f1a\u51fa\u73b0\u5728\u7cfb\u7edf\u76f8\u518c\u4e2d"
+                                "来源：$sourceLabel\n将保存 ${imageUris.size} 张图片\n不会出现在系统相册中"
                             )
                         },
                         confirmButton = {
@@ -67,14 +71,14 @@ class ShareReceiverActivity : ComponentActivity() {
                                 showDialog = false
                                 saveImagesAndFinish(imageUris, sourceApp)
                             }) {
-                                Text("\u4fdd\u5b58")
+                                Text("保存到工作相册")
                             }
                         },
                         dismissButton = {
                             TextButton(onClick = {
                                 finish()
                             }) {
-                                Text("\u53d6\u6d88")
+                                Text("取消")
                             }
                         }
                     )
@@ -83,15 +87,46 @@ class ShareReceiverActivity : ComponentActivity() {
         }
     }
 
-    private fun saveImagesAndFinish(uris: List<android.net.Uri>, source: String) {
+    /**
+     * 识别图片来源 APP
+     */
+    private fun detectSourceApp(intent: Intent): String {
+        // 微信的「用其他应用打开」用 referrer 或 calling package
+        val referrer = intent.getStringExtra("android.intent.extra.REFERRER_NAME") ?: ""
+        if (referrer.contains("tencent.mm")) return "wechat"
+
+        val pkg = intent.`package` ?: ""
+        return when {
+            pkg.contains("tencent.mm") -> "wechat"
+            pkg.contains("tencent.mobileqq") -> "qq"
+            pkg.contains("com.alibaba.android.rimet") -> "dingtalk"
+            pkg.contains("chrome") || pkg.contains("mozilla") -> "browser"
+            else -> "other"
+        }
+    }
+
+    private fun sourceLabel(source: String) = when (source) {
+        "wechat" -> "微信"
+        "qq" -> "QQ"
+        "dingtalk" -> "钉钉"
+        "browser" -> "浏览器"
+        else -> source
+    }
+
+    /**
+     * 批量保存图片到工作相册私有目录
+     */
+    private fun saveImagesAndFinish(uris: List<Uri>, source: String) {
         val repo = (application as WorkAlbumApplication).imageRepository
         lifecycleScope.launch {
             var ok = 0
             for (uri in uris) {
-                try { repo.saveSharedImage(uri, source); ok++ }
-                catch (_: Exception) {}
+                try {
+                    repo.saveSharedImage(uri, source)
+                    ok++
+                } catch (_: Exception) {}
             }
-            Toast.makeText(this@ShareReceiverActivity, "\u5df2\u4fdd\u5b58 $ok \u5f20", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@ShareReceiverActivity, "已保存 $ok 张", Toast.LENGTH_SHORT).show()
             finish()
         }
     }

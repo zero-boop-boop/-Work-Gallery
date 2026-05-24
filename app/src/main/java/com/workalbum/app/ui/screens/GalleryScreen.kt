@@ -36,7 +36,8 @@ import java.util.*
 fun GalleryScreen(
     repository: ImageRepository,
     onImageClick: (WorkImage) -> Unit,
-    onSettingsClick: () -> Unit = {}
+    onSettingsClick: () -> Unit = {},
+    onImportClick: () -> Unit = {}   // 新增：手动从系统相册导入按钮回调
 ) {
     val images by repository.getAllImages().collectAsState(initial = emptyList())
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
@@ -92,6 +93,17 @@ fun GalleryScreen(
                     actionIconContentColor = MaterialTheme.colorScheme.onPrimary
                 )
             )
+        },
+        // 右下角 FAB：手动导入
+        floatingActionButton = {
+            if (!isSelectionMode) {
+                FloatingActionButton(
+                    onClick = onImportClick,
+                    containerColor = MaterialTheme.colorScheme.secondary
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "从系统相册导入")
+                }
+            }
         }
     ) { padding ->
         if (images.isEmpty()) {
@@ -117,7 +129,13 @@ fun GalleryScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "在其他APP中选择\"分享\"→\"工作相册\"即可添加",
+                        "点击右下角 ⊕ 从系统相册导入",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "或在其他APP中选择\"分享\"→\"工作相册\"",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline
                     )
@@ -128,9 +146,9 @@ fun GalleryScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
-                state = rememberLazyListState(),
                 contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                state = rememberLazyListState()
             ) {
                 items(images, key = { it.id }) { image ->
                     ImageListItem(
@@ -139,17 +157,18 @@ fun GalleryScreen(
                         isSelected = image.id in selectedIds,
                         onClick = {
                             if (isSelectionMode) {
-                                selectedIds = if (image.id in selectedIds) {
+                                selectedIds = if (image.id in selectedIds)
                                     selectedIds - image.id
-                                } else {
+                                else
                                     selectedIds + image.id
-                                }
                             } else {
                                 onImageClick(image)
                             }
                         },
                         onLongClick = {
-                            selectedIds = selectedIds + image.id
+                            if (!isSelectionMode) {
+                                selectedIds = setOf(image.id)
+                            }
                         }
                     )
                 }
@@ -161,12 +180,11 @@ fun GalleryScreen(
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
-            title = { Text("确认删除") },
-            text = { Text("确定要删除选中的 ${selectedIds.size} 张图片吗？此操作不可恢复。") },
+            title = { Text("删除确认") },
+            text = { Text("确定要删除选中的 ${selectedIds.size} 张图片吗？此操作不可撤销。") },
             confirmButton = {
                 TextButton(onClick = {
                     showDeleteDialog = false
-                    // 删除选中的图片
                     scope.launch {
                         val toDelete = images.filter { it.id in selectedIds }
                         for (img in toDelete) {
@@ -204,6 +222,7 @@ private fun ImageListItem(
         "qq" -> "QQ"
         "dingtalk" -> "钉钉"
         "screenshot" -> "截图"
+        "manual_import" -> "手动导入"
         "browser" -> "浏览器"
         "email" -> "邮件"
         "camera" -> "相机"
@@ -256,6 +275,7 @@ private fun ImageListItem(
                     color = when (image.source) {
                         "screenshot" -> Color(0xFFFFF3E0)
                         "wechat" -> Color(0xFFE8F5E9)
+                        "manual_import" -> Color(0xFFE3F2FD)
                         else -> MaterialTheme.colorScheme.surfaceVariant
                     },
                     shape = MaterialTheme.shapes.extraSmall
